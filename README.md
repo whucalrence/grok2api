@@ -198,6 +198,7 @@ docker compose up -d
 | `app` | `app_key`, `app_url`, `api_key`, `webui_enabled`, `webui_key` |
 | `logging` | `file_level`, `max_files` |
 | `features` | `temporary`, `memory`, `stream`, `thinking`, `auto_chat_mode_fallback`, `thinking_summary`, `dynamic_statsig`, `enable_nsfw`, `show_search_sources`, `custom_instruction`, `image_format`, `imagine_public_image_proxy`, `video_format` |
+| `proxy` | `statsig_id` |
 | `proxy.egress` | `mode`, `proxy_url`, `proxy_pool`, `resource_proxy_url`, `resource_proxy_pool`, `skip_ssl_verify` |
 | `proxy.clearance` | `mode`, `cf_cookies`, `user_agent`, `browser`, `flaresolverr_url`, `timeout_sec`, `refresh_interval` |
 | `retry` | `reset_session_status_codes`, `max_retries`, `on_codes` |
@@ -210,6 +211,87 @@ docker compose up -d
 | `asset` | `upload_timeout`, `download_timeout`, `list_timeout`, `delete_timeout` |
 | `nsfw` | `timeout` |
 | `batch` | `nsfw_concurrency`, `refresh_concurrency`, `asset_upload_concurrency`, `asset_list_concurrency`, `asset_delete_concurrency` |
+
+### Grok App-Chat 兼容性
+
+如果聊天请求出现如下上游错误：
+
+```text
+Chat upstream returned 403
+Request rejected by anti-bot rules.
+```
+
+可以检查当前 Grok 网页端请求是否需要额外的浏览器会话 header。`x-statsig-id` 不是 Cloudflare Cookie，FlareSolverr 不会自动提供；如有需要，可以从自己的浏览器会话中复制该请求头并写入运行时配置：
+
+```toml
+[proxy]
+statsig_id = "your-browser-x-statsig-id"
+```
+
+不需要时保持为空：
+
+```toml
+[proxy]
+statsig_id = ""
+```
+
+获取方式：
+
+1. 在浏览器打开 `https://grok.com`
+2. 打开开发者工具的 Network 面板
+3. 正常发送一条 Grok 消息
+4. 找到 `https://grok.com/rest/app-chat/conversations/new`
+5. 在 Request Headers 中复制 `x-statsig-id`
+6. 写入本地 `config.toml`，保存后重试
+
+Cloudflare 放行凭证仍由 `proxy.clearance` 负责。例如使用 FlareSolverr 时：
+
+```toml
+[proxy.clearance]
+mode = "flaresolverr"
+flaresolverr_url = "http://flaresolverr:8191"
+timeout_sec = 120
+refresh_interval = 3600
+```
+
+请勿提交或公开真实的登录态、Cookie、请求头或密钥，包括：
+
+- `sso`
+- `sso-rw`
+- `cf_clearance`
+- `__cf_bm`
+- `x-statsig-id`
+- API Key
+- 管理后台密码
+
+### 配置边界与后续优化
+
+反代网页端接口时，部分信息必须来自用户自己的本地环境：
+
+- `app.api_key`：本地 OpenAI 兼容 API 的调用密钥
+- `app.app_key`：管理后台访问密钥
+- Grok SSO 登录态：用于代表真实 Grok 账号访问网页端
+- `app.app_url`：返回本地代理图片/视频 URL 时使用
+- `proxy.statsig_id`：必要时从用户自己的浏览器请求中复制
+- `proxy.clearance.*`：Cloudflare clearance 配置，推荐配合 FlareSolverr
+- `proxy.clearance.browser`：curl_cffi 浏览器指纹，例如 `chrome146`
+- `proxy.clearance.user_agent`：应尽量与 clearance/浏览器环境匹配
+
+项目内部会尽量自动处理请求兼容细节，用户不需要手动调整：
+
+- app-chat headers 形态
+- `sec-ch-ua` 生成
+- Chrome 版本解析
+- app-chat payload 字段结构
+- user 消息转发格式
+
+后续可以按需继续优化：
+
+1. 在管理后台提供 `proxy.statsig_id` 配置入口。
+2. 在 403 日志中提示可能需要刷新 `x-statsig-id`。
+3. 根据 FlareSolverr 返回的 User-Agent 自动选择最近的 curl_cffi browser profile。
+4. 增加连接测试，分别检查 SSO、clearance、statsig 和 chat 可用性。
+5. 如 `x-statsig-id` 频繁失效，再考虑可选的 Playwright 刷新器。
 
 ### 图片、视频格式
 
