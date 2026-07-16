@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type Handler struct {
 	gateway      *gateway.Service
 	models       *modelapp.Service
 	maxBodyBytes int64
+	publicAPIURL func() string
 }
 
 const (
@@ -42,8 +44,11 @@ var errResponseTransferLimit = errors.New("响应超过代理安全上限")
 
 const mediaTransferErrorTrailer = "X-Grok2API-Transfer-Error"
 
-func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBodyBytes int64) *Handler {
-	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes}
+func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBodyBytes int64, publicAPIURL func() string) *Handler {
+	if publicAPIURL == nil {
+		publicAPIURL = func() string { return "" }
+	}
+	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes, publicAPIURL: publicAPIURL}
 }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
@@ -55,6 +60,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/images/edits", h.editImage)
 	router.POST("/videos/generations", h.generateVideo)
 	router.GET("/videos/:requestId", h.getVideo)
+	router.GET("/videos/:requestId/content", h.getVideoContent)
 	router.POST("/responses/compact", h.compactResponse)
 	router.GET("/responses/:responseId", h.getResponse)
 	router.DELETE("/responses/:responseId", h.deleteResponse)
@@ -545,7 +551,24 @@ func (h *Handler) getVideo(c *gin.Context) {
 		writeGatewayError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, videoGenerationResponse(job))
+	c.JSON(http.StatusOK, videoGenerationResponse(job, h.videoContentURL(job.ID)))
+}
+
+func (h *Handler) getVideoContent(c *gin.Context) {
+	clientKey, _, ok := requestIdentity(c)
+	if !ok {
+		return
+	}
+	result, err := h.gateway.OpenVideoContent(c.Request.Context(), strings.TrimSpace(c.Param("requestId")), clientKey, c.GetHeader("Range"))
+	if err != nil {
+		writeGatewayError(c, err)
+		return
+	}
+	h.writeMediaResult(c, result)
+}
+
+func (h *Handler) videoContentURL(id string) string {
+	return strings.TrimRight(strings.TrimSpace(h.publicAPIURL()), "/") + "/v1/videos/" + url.PathEscape(id) + "/content"
 }
 
 func parseVideoDuration(durationRaw json.RawMessage) (int, error) {
@@ -596,12 +619,12 @@ func validVideoAspectRatio(value string) bool {
 	}
 }
 
-func videoGenerationResponse(job mediadomain.Job) gin.H {
+func videoGenerationResponse(job mediadomain.Job, contentURL string) gin.H {
 	switch job.Status {
 	case mediadomain.StatusCompleted:
 		return gin.H{
 			"status": "done", "model": job.Model, "progress": 100,
-			"video": gin.H{"url": job.UpstreamURL, "duration": job.Seconds, "respect_moderation": true},
+			"video": gin.H{"url": contentURL, "duration": job.Seconds, "respect_moderation": true},
 		}
 	case mediadomain.StatusFailed:
 		return gin.H{

@@ -140,7 +140,7 @@ const endpoints: Record<string, EndpointDefinition> = {
     fields: [{ name: "request_id", required: true, descriptionKey: "docs.reference.fieldRequestId" }],
     noteKeys: ["docs.reference.noteVideoPolling", "docs.reference.noteVideoStatus"],
     request: () => undefined,
-    response: { status: "done", model: "grok-imagine-video", progress: 100, video: { url: "https://example.com/generated.mp4", duration: 8, respect_moderation: true } },
+    response: { status: "done", model: "grok-imagine-video", progress: 100, video: { url: "http://127.0.0.1:8000/v1/videos/video_example/content", duration: 8, respect_moderation: true } },
   },
 };
 

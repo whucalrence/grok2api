@@ -130,6 +130,12 @@ func New(deps Dependencies) *gin.Engine {
 	if deps.SwaggerEnabled {
 		router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
+	publicAPIBaseURL := func() string {
+		if deps.Settings != nil {
+			return deps.Settings.PublicAPIBaseURL()
+		}
+		return deps.PublicAPIBaseURL
+	}
 	mediaHandler := mediahttp.NewHandler(deps.Media)
 	mediaHandler.RegisterPublic(router)
 
@@ -147,12 +153,7 @@ func New(deps Dependencies) *gin.Engine {
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
-	systemhttp.NewHandler(func() string {
-		if deps.Settings != nil {
-			return deps.Settings.PublicAPIBaseURL()
-		}
-		return deps.PublicAPIBaseURL
-	}).Register(adminProtected)
+	systemhttp.NewHandler(publicAPIBaseURL).Register(adminProtected)
 
 	v1 := router.Group("/v1")
 	v1.Use(deps.ConcurrencyGate.Middleware())
@@ -168,7 +169,7 @@ func New(deps Dependencies) *gin.Engine {
 		})
 	}
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
-	inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes).Register(v1)
+	inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes, publicAPIBaseURL).Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
 }

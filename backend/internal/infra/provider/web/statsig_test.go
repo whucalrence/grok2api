@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,8 +53,8 @@ func TestStatsigSignerSendsMethodPathAndMetaContent(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))), Header: http.Header{}}, nil
 	})}
 	value, err := signer.requestSignature(context.Background(), "https://signer.example/sign", "post", "/rest/app-chat/conversations/id/responses", "meta-value")
-	if err != nil || value != encoded {
-		t.Fatalf("value=%q err=%v", value, err)
+	if err != nil || value.value != encoded || !value.cacheable {
+		t.Fatalf("value=%#v err=%v", value, err)
 	}
 }
 
@@ -165,8 +166,94 @@ func TestStatsigSignerCachesByMethodAndPathForOneHour(t *testing.T) {
 	if _, _, err := signer.Sign(context.Background(), "https://grok.com", "https://signer.example/sign", "token-a", nil, http.MethodPost, "https://grok.com/rest/other"); err != nil {
 		t.Fatal(err)
 	}
-	if fetches != 4 {
-		t.Fatalf("different path reused signature: fetches=%d", fetches)
+	if fetches != 3 || len(signedMeta) != 4 {
+		t.Fatalf("different path fetches=%d signatures=%d", fetches, len(signedMeta))
+	}
+}
+
+func TestStatsigSignerNoStoreGeneratesUniqueValueForEveryRequest(t *testing.T) {
+	var fetches atomic.Int64
+	var signatures atomic.Int64
+	signer := newStatsigSigner()
+	signer.validateEndpoint = func(context.Context, string) error { return nil }
+	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+		return fmt.Sprintf("meta-%d", fetches.Add(1)), nil
+	}
+	signer.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		sequence := signatures.Add(1)
+		raw := make([]byte, 70)
+		raw[0] = byte(sequence)
+		body, _ := json.Marshal(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(raw)})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Header:     http.Header{"Cache-Control": []string{"private, No-Store"}},
+		}, nil
+	})}
+
+	const parallel = 8
+	type outcome struct {
+		value  string
+		source string
+		err    error
+	}
+	results := make(chan outcome, parallel)
+	for range parallel {
+		go func() {
+			value, source, err := signer.Sign(context.Background(), "https://grok.com", "http://statsig-signer:3000/sign", "token", nil, http.MethodPost, "https://grok.com/rest/app-chat/conversations/new")
+			results <- outcome{value: value, source: source, err: err}
+		}()
+	}
+	unique := make(map[string]bool, parallel)
+	for range parallel {
+		result := <-results
+		if result.err != nil || result.source != "live" || !validStatsigID(result.value) {
+			t.Fatalf("result=%#v", result)
+		}
+		unique[result.value] = true
+	}
+	if len(unique) != parallel || signatures.Load() != parallel || fetches.Load() != 1 {
+		t.Fatalf("unique=%d signatures=%d fetches=%d", len(unique), signatures.Load(), fetches.Load())
+	}
+}
+
+func TestStatsigInvalidationRefreshesSharedMetaForLiveSigner(t *testing.T) {
+	var fetches, signatures int
+	signer := newStatsigSigner()
+	signer.validateEndpoint = func(context.Context, string) error { return nil }
+	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+		fetches++
+		return fmt.Sprintf("meta-%d", fetches), nil
+	}
+	signer.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		signatures++
+		raw := make([]byte, 70)
+		raw[0] = byte(signatures)
+		body, _ := json.Marshal(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(raw)})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Header:     http.Header{"Cache-Control": []string{"no-store"}},
+		}, nil
+	})}
+
+	const baseURL = "https://grok.com"
+	const signerURL = "http://statsig-signer:3000/sign"
+	const target = "https://grok.com/rest/app-chat/conversations/new"
+	for range 2 {
+		if _, source, err := signer.Sign(context.Background(), baseURL, signerURL, "token", nil, http.MethodPost, target); err != nil || source != "live" {
+			t.Fatalf("source=%q err=%v", source, err)
+		}
+	}
+	if fetches != 1 || signatures != 2 {
+		t.Fatalf("before invalidation fetches=%d signatures=%d", fetches, signatures)
+	}
+	signer.Invalidate(baseURL, signerURL, http.MethodPost, target)
+	if _, source, err := signer.Sign(context.Background(), baseURL, signerURL, "token", nil, http.MethodPost, target); err != nil || source != "live" {
+		t.Fatalf("after invalidation source=%q err=%v", source, err)
+	}
+	if fetches != 2 || signatures != 3 {
+		t.Fatalf("after invalidation fetches=%d signatures=%d", fetches, signatures)
 	}
 }
 
@@ -210,6 +297,38 @@ func TestStatsigWarmupFetchesMetaOnceForSharedPaths(t *testing.T) {
 	}
 	if warmedAgain, err := signer.Warm(context.Background(), "https://grok.com", "https://signer.example/sign", "token", nil, targets); err != nil || warmedAgain != 0 || fetches != 1 {
 		t.Fatalf("cached warmup=%d fetches=%d err=%v", warmedAgain, fetches, err)
+	}
+}
+
+func TestStatsigWarmupStopsWhenSignerDisablesCaching(t *testing.T) {
+	var fetches, signatures int
+	signer := newStatsigSigner()
+	signer.validateEndpoint = func(context.Context, string) error { return nil }
+	signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) {
+		fetches++
+		return "shared-meta", nil
+	}
+	signer.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		signatures++
+		body, _ := json.Marshal(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(make([]byte, 70))})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Header:     http.Header{"Cache-Control": []string{"no-store"}},
+		}, nil
+	})}
+	targets := []statsigWarmTarget{
+		{method: http.MethodPost, target: "https://grok.com/rest/chat"},
+		{method: http.MethodPost, target: "https://grok.com/rest/rate-limits"},
+	}
+	if warmed, err := signer.Warm(context.Background(), "https://grok.com", "http://statsig-signer:3000/sign", "token", nil, targets); err != nil || warmed != 0 {
+		t.Fatalf("warmed=%d err=%v", warmed, err)
+	}
+	if warmed, err := signer.Warm(context.Background(), "https://grok.com", "http://statsig-signer:3000/sign", "token", nil, targets); err != nil || warmed != 0 {
+		t.Fatalf("second warmed=%d err=%v", warmed, err)
+	}
+	if fetches != 1 || signatures != 1 {
+		t.Fatalf("fetches=%d signatures=%d", fetches, signatures)
 	}
 }
 

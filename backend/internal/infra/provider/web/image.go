@@ -1109,7 +1109,7 @@ func writeImagineStreamFailure(writer io.Writer, streamID, code, message string)
 
 func (a *Adapter) downloadImage(ctx context.Context, credential account.Credential, rawURL string) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Scheme != "https" || !trustedImageAssetHost(parsed.Hostname()) || parsed.User != nil {
+	if err != nil || parsed.Scheme != "https" || !trustedGeneratedAssetHost(parsed.Hostname()) || parsed.User != nil {
 		return nil, fmt.Errorf("图片内容 URL 不受信任")
 	}
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
@@ -1210,7 +1210,7 @@ func decodeImageBlob(value string) ([]byte, error) {
 	return raw, nil
 }
 
-func trustedImageAssetHost(host string) bool {
+func trustedGeneratedAssetHost(host string) bool {
 	return strings.EqualFold(host, "assets.grok.com") || strings.EqualFold(host, "imagine-public.x.ai") || strings.EqualFold(host, "imgen.x.ai")
 }
 

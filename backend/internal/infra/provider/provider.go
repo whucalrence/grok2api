@@ -232,6 +232,12 @@ type VideoResult struct {
 	ContentType string
 }
 
+type VideoContentRequest struct {
+	Credential account.Credential
+	URL        string
+	ByteRange  string
+}
+
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。
 type RefreshedCredential struct {
 	EncryptedAccessToken  string
@@ -308,6 +314,12 @@ type ImageAssetStore interface {
 type VideoAdapter interface {
 	Adapter
 	GenerateVideo(ctx context.Context, request VideoRequest) (VideoResult, error)
+}
+
+// VideoContentAdapter 通过生成任务绑定的账号读取受保护的视频资源。
+type VideoContentAdapter interface {
+	Adapter
+	OpenVideoContent(ctx context.Context, request VideoContentRequest) (*Response, error)
 }
 
 type RoutingMetadataAdapter interface {
@@ -673,5 +685,14 @@ func (r *Registry) Videos(value account.Provider) (VideoAdapter, bool) {
 		return nil, false
 	}
 	result, ok := adapter.(VideoAdapter)
+	return result, ok
+}
+
+func (r *Registry) VideoContent(value account.Provider) (VideoContentAdapter, bool) {
+	adapter, ok := r.Get(value)
+	if !ok {
+		return nil, false
+	}
+	result, ok := adapter.(VideoContentAdapter)
 	return result, ok
 }

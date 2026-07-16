@@ -109,6 +109,8 @@ docker compose up -d --build
 
 Compose 会构建 Go 网关和独立的 Playwright signer。signer 使用会员 SSO 建立真实 Grok 浏览器会话，由浏览器维护该会话所需的 Cloudflare 状态，并调用当前网页代码生成 `x-statsig-id`；它不暴露宿主机端口。主服务仅在 signer 健康后启动，因此缺少或失效的 SSO 会在启动阶段直接暴露，而不会静默退回固定签名。Compose 提供的 signer 地址具有部署级优先级，即使旧数据库仍保存手动签名模式，也会使用本地 signer。
 
+本地 signer 明确禁止缓存签名，因此网关会为每个上游请求生成新的 `x-statsig-id`，只在一小时内复用不含凭据的页面验证元数据。上游返回 `403` 时，两者都会立即失效并重新校准。signer 启动时以及默认每 5 分钟会访问受保护的额度接口确认登录态；失败或探测结果过期时 `/healthz` 返回 `503`。可通过 `GROK2API_SIGNER_AUTH_CHECK_INTERVAL_MS` 调整探测周期。
+
 `config.yaml` 以只读方式挂载，`grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。签名链路不需要 FlareSolverr，也不需要复制或定期刷新 `cf_clearance`、`x-statsig-id` 或浏览器指纹参数。Playwright 的 Cookie 不会导出给 Go 网关；如果网关出口本身被 Cloudflare 拒绝，仍需在“出口代理”中配置来自同一浏览器会话的代理、User-Agent 与 Cloudflare Cookie。
 
 常用命令：
@@ -229,8 +231,11 @@ Authorization: Bearer g2a_xxx_xxx
 | `GET` | `/v1/media/images/{id}` | 公开归档图片 |
 | `POST` | `/v1/videos/generations` | 创建视频任务 |
 | `GET` | `/v1/videos/{request_id}` | 查询视频任务 |
+| `GET` | `/v1/videos/{request_id}/content` | 读取视频内容，支持单段 `Range` |
 
 Responses 资源查询、删除和 compact 的实际可用性取决于目标模型所属 Provider；Grok Console 仅支持无状态 `POST /v1/responses`。
+
+视频任务完成后，`video.url` 指向网关的内容端点，而不是需要会员 SSO 的 Grok 资源地址。读取该 URL 必须携带创建任务时使用的客户端 API Key；浏览器播放和分段下载可以传递标准单段 `Range` 请求头。
 
 管理端登录后可在 `/docs` 查看当前 Base URL、可用模型以及 cURL、Python 和 JavaScript 示例。开发环境还可以在 `config.yaml` 设置 `server.swaggerEnabled: true`，通过 `/swagger/index.html` 查看公开 API 的 Swagger 文档；生产环境应保持关闭。
 
@@ -288,7 +293,17 @@ Provider（包括 Console 上游地址与 User-Agent）、服务容量、批量�
 - 不要将 OAuth、SSO、Cloudflare Cookie 或账号导出文件提交到 Git
 - 对外暴露前建议配置反向代理、访问日志和基础网络防护
 
-遇到 Grok `403` 时，网关会丢弃缓存签名并再次调用本地 signer。若 signer 自身不健康，先检查 `docker compose logs statsig-signer`，确认 SSO 仍有效；不要把浏览器中抓到的 `x-statsig-id` 固定写入配置。若日志已出现 `signature_created` 但上游仍持续返回 `403`，应继续检查网关出口的 IP、User-Agent 与 Cloudflare Cookie 是否属于同一会话。
+遇到 Grok `403` 时，网关会丢弃页面验证元数据并再次调用本地 signer。若 signer 自身不健康，先检查 `docker compose logs statsig-signer`，确认 SSO 仍有效；不要把浏览器中抓到的 `x-statsig-id` 固定写入配置。若日志已出现 `signature_created` 但上游仍持续返回 `403`，应继续检查网关出口的 IP、User-Agent 与 Cloudflare Cookie 是否属于同一会话。
+
+图片生成、图片编辑和视频生成的真实冒烟测试会消耗上游额度。测试工具只从文件读取 API Key，自身不写入媒体文件，也不会输出凭据、媒体 URL 或任务 ID；网关仍会按照 `media` 配置归档生成图片：
+
+```bash
+GROK2API_BASE_URL=http://127.0.0.1:8000 \
+GROK2API_API_KEY_FILE=.secrets/api-key \
+node scripts/smoke-media.mjs
+```
+
+若视频已经提交，只需重新验证轮询与内容下载，可将任务 ID 单独放入受限文件并设置 `GROK2API_MEDIA_SMOKE_VIDEO_REQUEST_ID_FILE`；该模式不会再次生成图片或视频。
 
 ## 开发
 

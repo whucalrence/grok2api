@@ -538,8 +538,8 @@ func TestImagineCollectorSettlesModeratedSlots(t *testing.T) {
 	}
 }
 
-func TestGeneratedImageAssetHostsRemainStrict(t *testing.T) {
-	if !trustedImageAssetHost("assets.grok.com") || !trustedImageAssetHost("imagine-public.x.ai") || !trustedImageAssetHost("imgen.x.ai") || trustedImageAssetHost("example.com") {
+func TestGeneratedAssetHostsRemainStrict(t *testing.T) {
+	if !trustedGeneratedAssetHost("assets.grok.com") || !trustedGeneratedAssetHost("imagine-public.x.ai") || !trustedGeneratedAssetHost("imgen.x.ai") || trustedGeneratedAssetHost("example.com") {
 		t.Fatal("generated image host allowlist is incorrect")
 	}
 }
@@ -625,6 +625,19 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 	if progress != 100 || postID != "post_1" || result.URL != "https://assets.grok.com/videos/final.mp4" || result.ContentType != "video/mp4" {
 		t.Fatalf("result = %#v, post = %q, progress = %d", result, postID, progress)
+	}
+}
+
+func TestNormalizeVideoByteRange(t *testing.T) {
+	for _, value := range []string{"bytes=0-65535", "bytes=1024-", "bytes=-4096"} {
+		if normalized := normalizeVideoByteRange(value); normalized != value {
+			t.Fatalf("range %q normalized to %q", value, normalized)
+		}
+	}
+	for _, value := range []string{"", "items=0-1", "bytes=-", "bytes=9-1", "bytes=0-1,4-5", "bytes=one-two"} {
+		if normalized := normalizeVideoByteRange(value); normalized != "" {
+			t.Fatalf("invalid range %q normalized to %q", value, normalized)
+		}
 	}
 }
 

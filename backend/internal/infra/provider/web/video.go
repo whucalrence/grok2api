@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,87 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
 	}
 	return result, nil
+}
+
+func (a *Adapter) OpenVideoContent(ctx context.Context, input provider.VideoContentRequest) (*provider.Response, error) {
+	parsed, err := url.Parse(strings.TrimSpace(input.URL))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !trustedGeneratedAssetHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("视频内容 URL 不受信任")
+	}
+	token, err := a.cipher.Decrypt(input.Credential.EncryptedAccessToken)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWebAsset, fmt.Sprintf("%d", input.Credential.ID))
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		lease.Release()
+		return nil, err
+	}
+	request.Header = buildHeaders(token, lease, "")
+	request.Header.Del("Content-Type")
+	request.Header.Set("Accept", "video/*,*/*;q=0.8")
+	if byteRange := normalizeVideoByteRange(input.ByteRange); byteRange != "" {
+		request.Header.Set("Range", byteRange)
+	}
+	response, err := lease.Do(request)
+	if err != nil {
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		lease.Release()
+		return nil, err
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if (response.StatusCode == http.StatusOK || response.StatusCode == http.StatusPartialContent) && !strings.HasPrefix(contentType, "video/") {
+		_ = response.Body.Close()
+		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+		lease.Release()
+		return nil, fmt.Errorf("上游视频 Content-Type 无效")
+	}
+	headers := http.Header{}
+	for _, name := range []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type", "ETag", "Last-Modified"} {
+		if value := response.Header.Get(name); value != "" {
+			headers.Set(name, value)
+		}
+	}
+	headers.Set("Cache-Control", "private, no-store")
+	headers.Set("X-Content-Type-Options", "nosniff")
+	return &provider.Response{
+		StatusCode: response.StatusCode,
+		Status:     response.Status,
+		Header:     headers,
+		Body: &releaseBody{ReadCloser: response.Body, release: func() {
+			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+			lease.Release()
+		}},
+		UpstreamURL: parsed.String(),
+	}, nil
+}
+
+func normalizeVideoByteRange(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 128 || !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+		return ""
+	}
+	start, end, ok := strings.Cut(strings.TrimPrefix(value, "bytes="), "-")
+	if !ok || strings.Contains(end, "-") || (start == "" && end == "") {
+		return ""
+	}
+	parse := func(part string) (uint64, bool) {
+		if part == "" {
+			return 0, true
+		}
+		parsed, err := strconv.ParseUint(part, 10, 63)
+		return parsed, err == nil
+	}
+	startValue, startOK := parse(start)
+	endValue, endOK := parse(end)
+	if !startOK || !endOK || (start != "" && end != "" && startValue > endValue) {
+		return ""
+	}
+	return value
 }
 
 func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {

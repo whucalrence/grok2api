@@ -10,6 +10,7 @@ services:
       PORT: "3000"
       GROK_BASE_URL: "https://grok.com"
       GROK_SSO_TOKEN_FILE: "/run/secrets/grok-sso-token"
+      AUTH_CHECK_INTERVAL_MS: "${GROK2API_SIGNER_AUTH_CHECK_INTERVAL_MS:-300000}"
     secrets:
       - source: grok_sso_token
         target: grok-sso-token

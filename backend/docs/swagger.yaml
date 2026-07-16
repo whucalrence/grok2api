@@ -457,6 +457,39 @@ paths:
       summary: 查询异步视频任务
       tags:
       - Videos
+  /v1/videos/{request_id}/content:
+    get:
+      parameters:
+      - description: Request ID
+        in: path
+        name: request_id
+        required: true
+        type: string
+      - description: Single byte range
+        in: header
+        name: Range
+        type: string
+      produces:
+      - video/mp4
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: file
+        "206":
+          description: Partial Content
+          schema:
+            type: file
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: 读取异步视频内容
+      tags:
+      - Videos
   /v1/videos/generations:
     post:
       consumes:

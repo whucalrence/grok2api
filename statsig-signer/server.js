@@ -2,11 +2,13 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
 import { isValidStatsigID, patchStatsigChunk, prepareStatsigDocument } from "./patcher.js";
+import { inferAccountTier, isLoginURL } from "./session.js";
 
 const port = parseInteger(process.env.PORT, 3000);
 const baseURL = parseBaseURL(process.env.GROK_BASE_URL ?? "https://grok.com");
 const navigationTimeoutMs = parseInteger(process.env.NAVIGATION_TIMEOUT_MS, 60000);
 const signerTimeoutMs = parseInteger(process.env.SIGNER_TIMEOUT_MS, 30000);
+const authCheckIntervalMs = parseInteger(process.env.AUTH_CHECK_INTERVAL_MS, 5 * 60 * 1000);
 const tokenFile = process.env.GROK_SSO_TOKEN_FILE ?? "/run/secrets/grok-sso-token";
 const maxBodyBytes = 32 * 1024;
 
@@ -17,8 +19,13 @@ let activeMeta = "";
 let ready = false;
 let stopping = false;
 let lastError = "starting";
+let accountTier = "unknown";
+let lastVerifiedAt = "";
+let lastVerifiedAtMs = 0;
+let activePatch = {};
 let operationQueue = Promise.resolve();
 let initializationTask;
+let authMonitor;
 
 function log(level, event, fields = {}) {
   process.stdout.write(`${JSON.stringify({ level, event, ...fields, time: new Date().toISOString() })}\n`);
@@ -46,6 +53,8 @@ function serialize(task) {
 async function closeSession() {
   ready = false;
   activeMeta = "";
+  accountTier = "unknown";
+  activePatch = {};
   page = undefined;
   if (context) {
     const previous = context;
@@ -146,6 +155,9 @@ async function createSession(metaContent) {
         }
         try {
           const response = await route.fetch();
+          if (isLoginURL(response.url(), baseURL)) {
+            throw new Error("Grok SSO session was redirected to login");
+          }
           const source = await response.text();
           const result = prepareStatsigDocument(source, metaContent);
           if (!result.found) {
@@ -198,26 +210,121 @@ async function createSession(metaContent) {
     if (!response || response.status() >= 400) {
       throw new Error(`Grok page returned ${response?.status() ?? "no response"}`);
     }
-    await nextPage.waitForFunction(() => typeof globalThis.__grok2apiStatsigSign === "function", null, {
-      timeout: signerTimeoutMs,
-    });
-    await withTimeout(signedResponseSeen, signerTimeoutMs, "Grok did not accept a signed browser request");
+    if (isLoginURL(nextPage.url(), baseURL)) {
+      throw new Error("Grok SSO session was redirected to login");
+    }
+    try {
+      await nextPage.waitForFunction(() => typeof globalThis.__grok2apiStatsigSign === "function", null, {
+        timeout: signerTimeoutMs,
+      });
+    } catch (error) {
+      if (!patchState.patched) {
+        throw new Error(`Grok signer wrapper structure changed after inspecting ${patchState.inspected} chunks`);
+      }
+      throw error;
+    }
+    await withTimeout(signedResponseSeen, signerTimeoutMs, "Grok page did not initialize its signing session");
     nextContext.off("response", observeSignedResponse);
+    const verification = await verifyAuthenticatedSession(nextPage);
 
     context = nextContext;
     page = nextPage;
     activeMeta = documentMeta;
+    recordVerification(verification, false);
+    activePatch = {
+      version: "turbopack-wrapper-v1",
+      loaderModuleID: patchState.loaderModuleID,
+      chunkPath: patchState.chunkPath,
+    };
     ready = true;
     lastError = "";
     log("info", "signer_ready", {
       inspectedChunks: patchState.inspected,
       loaderModuleID: patchState.loaderModuleID,
       chunkPath: patchState.chunkPath,
+      tier: accountTier,
     });
   } catch (error) {
     nextContext.off("response", observeSignedResponse);
     await nextContext.close().catch(() => {});
     throw error;
+  }
+}
+
+async function verifyAuthenticatedSession(targetPage) {
+  const windows = await withTimeout(
+    targetPage.evaluate(async () => {
+      const results = [];
+      for (const mode of ["auto", "fast"]) {
+        const path = "/rest/rate-limits";
+        const statsigID = await globalThis.__grok2apiStatsigSign(path, "POST");
+        const response = await fetch(path, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "x-statsig-id": statsigID,
+            "x-xai-request-id": crypto.randomUUID(),
+          },
+          body: JSON.stringify({ modelName: mode }),
+        });
+        let payload;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        results.push({
+          mode,
+          status: response.status,
+          url: response.url,
+          total: Number(payload?.totalQueries),
+        });
+      }
+      return results;
+    }),
+    signerTimeoutMs,
+    "authenticated Grok session probe timed out",
+  );
+  for (const window of windows) {
+    if (window.url && isLoginURL(window.url, baseURL)) {
+      throw new Error(
+        `Grok protected quota probe was redirected (status ${window.status}, destination ${describeDestination(window.url)})`,
+      );
+    }
+    if (window.status === 401) {
+      throw new Error("Grok SSO session is unauthorized");
+    }
+    if (window.status === 403) {
+      throw new Error("Grok rejected the browser signature or session");
+    }
+    if (window.status !== 200) {
+      throw new Error(`Grok protected quota probe returned ${window.status}`);
+    }
+    if (!Number.isSafeInteger(window.total) || window.total <= 0) {
+      throw new Error("Grok protected quota response is invalid");
+    }
+  }
+  return { tier: inferAccountTier(windows) };
+}
+
+function describeDestination(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.origin === baseURL ? parsed.pathname.split("/").slice(0, 2).join("/") || "/" : "foreign-origin";
+  } catch {
+    return "invalid-url";
+  }
+}
+
+function recordVerification(verification, reportChange = true) {
+  const previousTier = accountTier;
+  accountTier = verification.tier;
+  lastVerifiedAt = new Date().toISOString();
+  lastVerifiedAtMs = Date.now();
+  if (reportChange && previousTier !== "unknown" && accountTier !== previousTier) {
+    log("warn", "account_tier_changed", { previousTier, tier: accountTier });
   }
 }
 
@@ -318,7 +425,17 @@ function sendJSON(response, status, value) {
 const server = http.createServer(async (request, response) => {
   const requestURL = new URL(request.url ?? "/", "http://127.0.0.1");
   if (request.method === "GET" && requestURL.pathname === "/healthz") {
-    sendJSON(response, ready ? 200 : 503, { ready, error: ready ? undefined : lastError });
+    const verificationFresh = lastVerifiedAtMs > 0 && Date.now() - lastVerifiedAtMs <= authCheckIntervalMs * 2;
+    const healthy = ready && verificationFresh;
+    const healthError = ready && !verificationFresh ? "authentication verification is stale" : lastError;
+    sendJSON(response, healthy ? 200 : 503, {
+      ready: healthy,
+      authenticated: healthy,
+      tier: healthy ? accountTier : undefined,
+      lastVerifiedAt: lastVerifiedAt || undefined,
+      signerPatch: healthy ? activePatch : undefined,
+      error: healthy ? undefined : healthError,
+    });
     return;
   }
   if (request.method !== "POST" || requestURL.pathname !== "/sign") {
@@ -350,7 +467,30 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, "0.0.0.0", () => {
   log("info", "server_listening", { port });
   scheduleInitialization();
+  startAuthMonitor();
 });
+
+function startAuthMonitor() {
+  authMonitor = setInterval(() => {
+    if (stopping || !ready || !page) {
+      return;
+    }
+    void serialize(async () => {
+      if (!ready || !page) {
+        return;
+      }
+      try {
+        recordVerification(await verifyAuthenticatedSession(page));
+      } catch (error) {
+        lastError = String(error?.message ?? error);
+        log("warn", "authenticated_session_lost", { error: lastError });
+        await closeSession();
+        scheduleInitialization();
+      }
+    });
+  }, authCheckIntervalMs);
+  authMonitor.unref();
+}
 
 function scheduleInitialization() {
   if (stopping || initializationTask) {
@@ -382,6 +522,7 @@ async function shutdown(signal) {
   }
   stopping = true;
   log("info", "shutdown", { signal });
+  clearInterval(authMonitor);
   server.close();
   await serialize(closeSession);
   await browser?.close().catch(() => {});

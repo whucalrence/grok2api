@@ -106,6 +106,46 @@ func (s *Service) GetVideo(ctx context.Context, id string, key clientkey.Key) (m
 	return job, nil
 }
 
+func (s *Service) OpenVideoContent(ctx context.Context, id string, key clientkey.Key, byteRange string) (*Result, error) {
+	job, err := s.GetVideo(ctx, id, key)
+	if err != nil || job.Status != media.StatusCompleted || job.UpstreamURL == "" {
+		return nil, ErrResponseNotFound
+	}
+	providerValue := account.Provider(job.Provider)
+	upstreamModel, ok := model.NormalizeUpstreamModel(providerValue, job.UpstreamModel)
+	if !ok {
+		return nil, ErrModelNotFound
+	}
+	adapter, ok := s.providers.VideoContent(providerValue)
+	if !ok {
+		return nil, ErrNoAvailableAccount
+	}
+	lease, err := s.selector.AcquirePinned(ctx, providerValue, job.AccountID, upstreamModel, "", true)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrResponseAccountUnavailable, err)
+	}
+	response, err := adapter.OpenVideoContent(ctx, provider.VideoContentRequest{
+		Credential: lease.Credential,
+		URL:        job.UpstreamURL,
+		ByteRange:  byteRange,
+	})
+	lease.Release()
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent && response.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("视频内容上游返回 %d", response.StatusCode)
+	}
+	return &Result{
+		StatusCode: response.StatusCode,
+		Status:     response.Status,
+		Header:     response.Header,
+		Body:       response.Body,
+		Finalize:   func(Usage, string, string) {},
+	}, nil
+}
+
 func (s *Service) RecoverVideoJobs(ctx context.Context) error {
 	if s.mediaJobs == nil {
 		return nil

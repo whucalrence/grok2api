@@ -18,7 +18,7 @@ import (
 func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20, nil).Register(router.Group("/v1"))
 
 	for _, test := range []struct {
 		name string
@@ -85,7 +85,7 @@ func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
 	}
 	contentRecorder := httptest.NewRecorder()
 	router.ServeHTTP(contentRecorder, httptest.NewRequest(http.MethodGet, "/v1/videos/request_1/content", nil))
-	if contentRecorder.Code != http.StatusNotFound {
+	if contentRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("video content endpoint status=%d", contentRecorder.Code)
 	}
 }
@@ -134,7 +134,7 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20, nil).Register(router.Group("/v1"))
 
 	missingVersion := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
 	missingVersion.Header.Set("Content-Type", "application/json")
@@ -166,7 +166,7 @@ func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 func TestJSONInferenceEndpointsRejectWrongMediaTypeAndTrailingDocument(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20, nil).Register(router.Group("/v1"))
 
 	for _, path := range []string{"/v1/responses", "/v1/images/generations"} {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"test","prompt":"test"}`))
@@ -206,16 +206,16 @@ func TestVideoDurationUsesOfficialFieldOnly(t *testing.T) {
 
 func TestVideoGenerationResponseMatchesOfficialPollingShape(t *testing.T) {
 	now := time.Now().UTC()
-	pending := videoGenerationResponse(mediadomain.Job{Model: "grok-imagine-video", Status: mediadomain.StatusInProgress, Progress: 42})
+	pending := videoGenerationResponse(mediadomain.Job{Model: "grok-imagine-video", Status: mediadomain.StatusInProgress, Progress: 42}, "")
 	if pending["status"] != "pending" || pending["progress"] != 42 || pending["model"] != "grok-imagine-video" || pending["video"] != nil {
 		t.Fatalf("pending response=%#v", pending)
 	}
-	done := videoGenerationResponse(mediadomain.Job{Model: "grok-imagine-video", Status: mediadomain.StatusCompleted, Progress: 100, Seconds: 8, UpstreamURL: "https://assets.grok.com/video.mp4", CompletedAt: &now})
+	done := videoGenerationResponse(mediadomain.Job{ID: "video_test", Model: "grok-imagine-video", Status: mediadomain.StatusCompleted, Progress: 100, Seconds: 8, UpstreamURL: "https://assets.grok.com/video.mp4", CompletedAt: &now}, "https://api.example/v1/videos/video_test/content")
 	video, ok := done["video"].(gin.H)
-	if done["status"] != "done" || done["progress"] != 100 || !ok || video["url"] != "https://assets.grok.com/video.mp4" || video["duration"] != 8 || video["respect_moderation"] != true {
+	if done["status"] != "done" || done["progress"] != 100 || !ok || video["url"] != "https://api.example/v1/videos/video_test/content" || video["duration"] != 8 || video["respect_moderation"] != true {
 		t.Fatalf("done response=%#v", done)
 	}
-	failed := videoGenerationResponse(mediadomain.Job{Status: mediadomain.StatusFailed, ErrorCode: "account_unavailable", ErrorMessage: "try later"})
+	failed := videoGenerationResponse(mediadomain.Job{Status: mediadomain.StatusFailed, ErrorCode: "account_unavailable", ErrorMessage: "try later"}, "")
 	errorValue, ok := failed["error"].(gin.H)
 	if failed["status"] != "failed" || !ok || errorValue["code"] != "service_unavailable" || failed["model"] != nil || failed["progress"] != nil {
 		t.Fatalf("failed response=%#v", failed)
@@ -225,7 +225,7 @@ func TestVideoGenerationResponseMatchesOfficialPollingShape(t *testing.T) {
 func TestImageGenerationEndpointValidatesXAIContractBeforeRouting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20, nil).Register(router.Group("/v1"))
 
 	for _, test := range []struct {
 		name string
@@ -257,7 +257,7 @@ func TestImageGenerationEndpointValidatesXAIContractBeforeRouting(t *testing.T) 
 func TestImageEditAcceptsOfficialJSONShape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20, nil).Register(router.Group("/v1"))
 
 	missingImage := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{
 		"model":"grok-imagine-image-edit","prompt":"变成黑色 白字","n":1

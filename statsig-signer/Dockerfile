@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-COPY patcher.js server.js healthcheck.js ./
+COPY patcher.js session.js server.js healthcheck.js ./
 
 ENV NODE_ENV=production \
     PORT=3000 \

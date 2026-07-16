@@ -24,6 +24,7 @@ import (
 const (
 	defaultStatsigSignerURL = "https://grok.wodf.de/sign"
 	statsigCacheTTL         = time.Hour
+	statsigMetaCacheTTL     = time.Hour
 	statsigCacheMaxEntries  = 4096
 	statsigMetaBodyLimit    = 4 << 20
 	statsigResponseLimit    = 4 << 10
@@ -39,6 +40,19 @@ type statsigSignResult struct {
 	source string
 }
 
+type statsigSignature struct {
+	value     string
+	cacheable bool
+}
+
+type statsigCachePolicy uint8
+
+const (
+	statsigCacheUnknown statsigCachePolicy = iota
+	statsigCacheEnabled
+	statsigCacheDisabled
+)
+
 type statsigWarmTarget struct {
 	method string
 	target string
@@ -51,7 +65,10 @@ type statsigSigner struct {
 	now              func() time.Time
 	mu               sync.Mutex
 	entries          map[string]statsigCacheEntry
+	metaEntries      map[string]statsigCacheEntry
+	cachePolicies    map[string]statsigCachePolicy
 	refreshes        singleflight.Group
+	metaRefreshes    singleflight.Group
 }
 
 func newStatsigSigner() *statsigSigner {
@@ -64,6 +81,8 @@ func newStatsigSigner() *statsigSigner {
 		validateEndpoint: validateStatsigSignerEndpoint,
 		now:              time.Now,
 		entries:          make(map[string]statsigCacheEntry),
+		metaEntries:      make(map[string]statsigCacheEntry),
+		cachePolicies:    make(map[string]statsigCachePolicy),
 	}
 }
 
@@ -72,23 +91,22 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 	if err != nil {
 		return "", "", err
 	}
-	if value, ok := s.cached(key, s.now().UTC()); ok {
-		return value, "cache", nil
+	policy := s.cachePolicy(signerURL)
+	if policy != statsigCacheDisabled {
+		if value, ok := s.cached(key, s.now().UTC()); ok {
+			return value, "cache", nil
+		}
+	}
+	if policy == statsigCacheDisabled || policy == statsigCacheUnknown {
+		result, refreshErr := s.refreshSignature(ctx, baseURL, signerURL, token, lease, method, key, path)
+		return result.value, result.source, refreshErr
 	}
 	value, err, _ := s.refreshes.Do(key, func() (any, error) {
 		now := s.now().UTC()
 		if cached, ok := s.cached(key, now); ok {
 			return statsigSignResult{value: cached, source: "cache"}, nil
 		}
-		fresh, refreshErr := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
-		if refreshErr != nil {
-			if stale, ok := s.stale(key); ok {
-				return statsigSignResult{value: stale, source: "stale"}, nil
-			}
-			return statsigSignResult{}, refreshErr
-		}
-		s.store(key, fresh, now.Add(statsigCacheTTL), now)
-		return statsigSignResult{value: fresh, source: "refresh"}, nil
+		return s.refreshSignature(ctx, baseURL, signerURL, token, lease, method, key, path)
 	})
 	if err != nil {
 		return "", "", err
@@ -97,8 +115,53 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 	return result.value, result.source, nil
 }
 
+func (s *statsigSigner) refreshSignature(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, key, path string) (statsigSignResult, error) {
+	now := s.now().UTC()
+	fresh, refreshErr := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
+	if refreshErr != nil {
+		if stale, ok := s.stale(key); ok {
+			return statsigSignResult{value: stale, source: "stale"}, nil
+		}
+		return statsigSignResult{}, refreshErr
+	}
+	s.setCachePolicy(signerURL, fresh.cacheable)
+	if !fresh.cacheable {
+		return statsigSignResult{value: fresh.value, source: "live"}, nil
+	}
+	s.store(key, fresh.value, now.Add(statsigCacheTTL), now)
+	return statsigSignResult{value: fresh.value, source: "refresh"}, nil
+}
+
+func (s *statsigSigner) cachePolicy(endpoint string) statsigCachePolicy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cachePolicies[strings.TrimSpace(endpoint)]
+}
+
+func (s *statsigSigner) setCachePolicy(endpoint string, cacheable bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	policy := statsigCacheEnabled
+	if !cacheable {
+		policy = statsigCacheDisabled
+	}
+	s.mu.Lock()
+	s.cachePolicies[endpoint] = policy
+	if !cacheable {
+		marker := "\x00" + endpoint + "\x00"
+		for key := range s.entries {
+			if strings.Contains(key, marker) {
+				delete(s.entries, key)
+			}
+		}
+	}
+	s.mu.Unlock()
+}
+
 // Warm 使用一次 metaContent 请求预热多个常用签名键，避免按账号或按路径重复抓取首页。
 func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, targets []statsigWarmTarget) (int, error) {
+	if s.cachePolicy(signerURL) == statsigCacheDisabled {
+		return 0, nil
+	}
 	now := s.now().UTC()
 	type pendingTarget struct {
 		key    string
@@ -119,7 +182,7 @@ func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token stri
 	if len(pending) == 0 {
 		return 0, nil
 	}
-	meta, err := s.fetchMeta(ctx, baseURL, token, lease)
+	meta, err := s.metaContent(ctx, baseURL, signerURL, token, lease)
 	if err != nil {
 		return 0, err
 	}
@@ -129,29 +192,34 @@ func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token stri
 		if signErr != nil {
 			return warmed, signErr
 		}
-		s.store(target.key, value, now.Add(statsigCacheTTL), now)
+		s.setCachePolicy(signerURL, value.cacheable)
+		if !value.cacheable {
+			return warmed, nil
+		}
+		s.store(target.key, value.value, now.Add(statsigCacheTTL), now)
 		warmed++
 	}
 	return warmed, nil
 }
 
-func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, path string) (string, error) {
-	meta, err := s.fetchMeta(ctx, baseURL, token, lease)
+func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, path string) (statsigSignature, error) {
+	meta, err := s.metaContent(ctx, baseURL, signerURL, token, lease)
 	if err != nil {
-		return "", err
+		return statsigSignature{}, err
 	}
 	signature, err := s.requestSignature(ctx, signerURL, method, path, meta)
 	if err == nil {
 		return signature, nil
 	}
 
-	meta, refreshErr := s.fetchMeta(ctx, baseURL, token, lease)
+	s.invalidateMeta(baseURL, signerURL)
+	meta, refreshErr := s.metaContent(ctx, baseURL, signerURL, token, lease)
 	if refreshErr != nil {
-		return "", fmt.Errorf("刷新 Statsig metaContent: %w", refreshErr)
+		return statsigSignature{}, fmt.Errorf("刷新 Statsig metaContent: %w", refreshErr)
 	}
 	signature, retryErr := s.requestSignature(ctx, signerURL, method, path, meta)
 	if retryErr != nil {
-		return "", fmt.Errorf("Statsig 签名失败: %w", retryErr)
+		return statsigSignature{}, fmt.Errorf("Statsig 签名失败: %w", retryErr)
 	}
 	return signature, nil
 }
@@ -163,12 +231,75 @@ func (s *statsigSigner) Invalidate(baseURL, signerURL, method, target string) {
 	}
 	s.mu.Lock()
 	delete(s.entries, key)
+	delete(s.metaEntries, statsigMetaKey(baseURL, signerURL))
 	s.mu.Unlock()
 }
 
 func (s *statsigSigner) Clear() {
 	s.mu.Lock()
 	clear(s.entries)
+	clear(s.metaEntries)
+	clear(s.cachePolicies)
+	s.mu.Unlock()
+}
+
+func (s *statsigSigner) metaContent(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease) (string, error) {
+	key := statsigMetaKey(baseURL, signerURL)
+	now := s.now().UTC()
+	if value, ok := s.cachedMeta(key, now); ok {
+		return value, nil
+	}
+	value, err, _ := s.metaRefreshes.Do(key, func() (any, error) {
+		now := s.now().UTC()
+		if cached, ok := s.cachedMeta(key, now); ok {
+			return cached, nil
+		}
+		fresh, fetchErr := s.fetchMeta(ctx, baseURL, token, lease)
+		if fetchErr != nil {
+			if stale, ok := s.staleMeta(key); ok {
+				return stale, nil
+			}
+			return "", fetchErr
+		}
+		s.storeMeta(key, fresh, now.Add(statsigMetaCacheTTL))
+		return fresh, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func statsigMetaKey(baseURL, signerURL string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/") + "\x00" + strings.TrimSpace(signerURL)
+}
+
+func (s *statsigSigner) invalidateMeta(baseURL, signerURL string) {
+	s.mu.Lock()
+	delete(s.metaEntries, statsigMetaKey(baseURL, signerURL))
+	s.mu.Unlock()
+}
+
+func (s *statsigSigner) cachedMeta(key string, now time.Time) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.metaEntries[key]
+	if !ok || !now.Before(entry.expiresAt) {
+		return "", false
+	}
+	return entry.value, true
+}
+
+func (s *statsigSigner) staleMeta(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.metaEntries[key]
+	return entry.value, ok
+}
+
+func (s *statsigSigner) storeMeta(key, value string, expiresAt time.Time) {
+	s.mu.Lock()
+	s.metaEntries[key] = statsigCacheEntry{value: value, expiresAt: expiresAt}
 	s.mu.Unlock()
 }
 
@@ -223,9 +354,9 @@ func statsigSignatureKey(baseURL, signerURL, method, target string) (string, str
 	return strings.TrimRight(baseURL, "/") + "\x00" + strings.TrimSpace(signerURL) + "\x00" + method + "\x00" + path, path, nil
 }
 
-func (s *statsigSigner) requestSignature(ctx context.Context, endpoint, method, path, metaContent string) (string, error) {
+func (s *statsigSigner) requestSignature(ctx context.Context, endpoint, method, path, metaContent string) (statsigSignature, error) {
 	if err := s.validateEndpoint(ctx, endpoint); err != nil {
-		return "", err
+		return statsigSignature{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"method": strings.ToUpper(strings.TrimSpace(method)),
@@ -236,31 +367,43 @@ func (s *statsigSigner) requestSignature(ctx context.Context, endpoint, method, 
 	})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", err
+		return statsigSignature{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := s.client.Do(request)
 	if err != nil {
-		return "", err
+		return statsigSignature{}, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, statsigResponseLimit+1))
 	if err != nil {
-		return "", err
+		return statsigSignature{}, err
 	}
 	if len(body) > statsigResponseLimit {
-		return "", fmt.Errorf("签名响应超过安全上限")
+		return statsigSignature{}, fmt.Errorf("签名响应超过安全上限")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("签名服务返回 %d", response.StatusCode)
+		return statsigSignature{}, fmt.Errorf("签名服务返回 %d", response.StatusCode)
 	}
 	var value struct {
 		StatsigID string `json:"x-statsig-id"`
 	}
 	if json.Unmarshal(body, &value) != nil || !validStatsigID(value.StatsigID) {
-		return "", fmt.Errorf("签名服务响应无效")
+		return statsigSignature{}, fmt.Errorf("签名服务响应无效")
 	}
-	return value.StatsigID, nil
+	return statsigSignature{value: value.StatsigID, cacheable: statsigResponseCacheable(response.Header)}, nil
+}
+
+func statsigResponseCacheable(header http.Header) bool {
+	for _, value := range header.Values("Cache-Control") {
+		for _, directive := range strings.Split(value, ",") {
+			name := strings.TrimSpace(strings.SplitN(directive, "=", 2)[0])
+			if strings.EqualFold(name, "no-store") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateStatsigSignerEndpoint(ctx context.Context, endpoint string) error {

@@ -221,3 +221,16 @@ func swaggerGenerateVideo() {}
 // @Failure 404 {object} map[string]any
 // @Router /v1/videos/{request_id} [get]
 func swaggerGetVideo() {}
+
+// swaggerGetVideoContent godoc
+// @Summary 读取异步视频内容
+// @Tags Videos
+// @Security BearerAuth
+// @Produce video/mp4
+// @Param request_id path string true "Request ID"
+// @Param Range header string false "Single byte range"
+// @Success 200 {file} binary
+// @Success 206 {file} binary
+// @Failure 404 {object} map[string]any
+// @Router /v1/videos/{request_id}/content [get]
+func swaggerGetVideoContent() {}
