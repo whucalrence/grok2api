@@ -235,6 +235,8 @@ Authorization: Bearer g2a_xxx_xxx
 
 Responses 资源查询、删除和 compact 的实际可用性取决于目标模型所属 Provider；Grok Console 仅支持无状态 `POST /v1/responses`。
 
+公开的 `/v1` API 支持浏览器跨域调用和 `OPTIONS` 预检，可直接用于运行在不同 Origin 的 OpenAI 兼容 Web/桌面客户端；管理员接口不会返回这些跨域许可头。
+
 视频任务完成后，`video.url` 指向网关的内容端点，而不是需要会员 SSO 的 Grok 资源地址。读取该 URL 必须携带创建任务时使用的客户端 API Key；浏览器播放和分段下载可以传递标准单段 `Range` 请求头。
 
 管理端登录后可在 `/docs` 查看当前 Base URL、可用模型以及 cURL、Python 和 JavaScript 示例。开发环境还可以在 `config.yaml` 设置 `server.swaggerEnabled: true`，通过 `/swagger/index.html` 查看公开 API 的 Swagger 文档；生产环境应保持关闭。

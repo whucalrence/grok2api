@@ -156,6 +156,9 @@ func New(deps Dependencies) *gin.Engine {
 	systemhttp.NewHandler(publicAPIBaseURL).Register(adminProtected)
 
 	v1 := router.Group("/v1")
+	v1.Use(middleware.OpenAICORS())
+	// 浏览器预检不携带 API Key，必须在流量门控与客户端鉴权之前完成。
+	v1.OPTIONS("/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	v1.Use(deps.ConcurrencyGate.Middleware())
 	if deps.TrafficReady != nil {
 		v1.Use(func(c *gin.Context) {

@@ -81,6 +81,19 @@ func SecurityHeaders() gin.HandlerFunc {
 	}
 }
 
+// OpenAICORS 允许浏览器中的 OpenAI 兼容客户端调用公开 /v1 API。
+// 管理端使用 Cookie 鉴权，不应用此中间件。
+func OpenAICORS() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-API-Key, X-Request-ID, Anthropic-Version, Anthropic-Beta, OpenAI-Organization, OpenAI-Project")
+		c.Header("Access-Control-Expose-Headers", "X-Request-ID, Content-Length, Content-Range, Accept-Ranges")
+		c.Header("Access-Control-Max-Age", "600")
+		c.Next()
+	}
+}
+
 // AccessLog 只记录路径、状态和耗时，不读取请求或响应正文。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {

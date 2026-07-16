@@ -72,6 +72,39 @@ func TestInferenceTrafficIsRejectedWhileReconciling(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleCORSPreflightBypassesClientAuthentication(t *testing.T) {
+	deps := testDependencies()
+	deps.TrafficReady = func() bool { return false }
+	router := New(deps)
+	request := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	request.Header.Set("Origin", "http://localhost:3000")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "authorization")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if value := recorder.Header().Get("Access-Control-Allow-Origin"); value != "*" {
+		t.Fatalf("allow origin = %q", value)
+	}
+	if value := recorder.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(value, "Authorization") {
+		t.Fatalf("allow headers = %q", value)
+	}
+	if value := recorder.Header().Get("Access-Control-Allow-Credentials"); value != "" {
+		t.Fatalf("allow credentials = %q", value)
+	}
+
+	adminRequest := httptest.NewRequest(http.MethodOptions, "/api/admin/v1/accounts", nil)
+	adminRequest.Header.Set("Origin", "http://localhost:3000")
+	adminRecorder := httptest.NewRecorder()
+	router.ServeHTTP(adminRecorder, adminRequest)
+	if value := adminRecorder.Header().Get("Access-Control-Allow-Origin"); value != "" {
+		t.Fatalf("admin allow origin = %q", value)
+	}
+}
+
 func TestSystemInfoRequiresAdminAuthentication(t *testing.T) {
 	deps := testDependencies()
 	deps.PublicAPIBaseURL = "https://api.example.com"
