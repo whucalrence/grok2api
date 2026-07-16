@@ -11,6 +11,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+/.secrets/
 /config.yaml
 /config.local.yaml
 /config.*.local.yaml
@@ -37,6 +38,7 @@ Thumbs.db
 # Frontend
 /.pnpm-store/
 /frontend/node_modules/
+/statsig-signer/node_modules/
 /frontend/dist/
 /frontend/.cache/
 /frontend/*.tsbuildinfo

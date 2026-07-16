@@ -1,13 +1,40 @@
 name: grok2api
 
 services:
-  grok2api:
-    container_name: grok2api
-    image: "${GROK2API_IMAGE:-ghcr.io/chenyme/grok2api:latest}"
-    ports:
-      - "${GROK2API_PORT:-8000}:8000"
+  statsig-signer:
+    image: "${GROK2API_STATSIG_SIGNER_IMAGE:-grok2api-statsig-signer:local}"
+    build:
+      context: ./statsig-signer
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
+      PORT: "3000"
+      GROK_BASE_URL: "https://grok.com"
+      GROK_SSO_TOKEN_FILE: "/run/secrets/grok-sso-token"
+    secrets:
+      - source: grok_sso_token
+        target: grok-sso-token
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 4
+
+  grok2api:
+    image: "${GROK2API_IMAGE:-grok2api:local}"
+    build:
+      context: .
+    ports:
+      - "${GROK2API_BIND_ADDRESS:-0.0.0.0}:${GROK2API_PORT:-8000}:8000"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      GROK2API_STATSIG_SIGNER_URL: "http://statsig-signer:3000/sign"
     volumes:
       - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
       - grok2api-data:/app/data
@@ -16,6 +43,9 @@ services:
     stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      statsig-signer:
+        condition: service_healthy
 
   # 如果出口 IP 不干净，可取消以下注释使用 WARP 作为落地代理。
   # 启用后，在管理端“设置 -> 出口代理”中新增 socks5://warp:1080。
@@ -32,3 +62,7 @@ services:
 
 volumes:
   grok2api-data:
+
+secrets:
+  grok_sso_token:
+    file: "${GROK2API_SSO_TOKEN_FILE:-./.secrets/grok-sso-token}"

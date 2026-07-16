@@ -297,8 +297,8 @@ func maxBatchConcurrency(value config.BatchConfig) int {
 func webProviderConfig(cfg config.Config) webprovider.Config {
 	return webprovider.Config{
 		BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeoutSeconds: int(cfg.Provider.Web.QuotaTimeout.Value().Seconds()),
-		StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
-		StatsigSignerURL:   cfg.Provider.Web.StatsigSignerURL,
+		StatsigMode: cfg.Provider.Web.EffectiveStatsigMode(), StatsigManualValue: cfg.Provider.Web.StatsigManualValue,
+		StatsigSignerURL:   cfg.Provider.Web.EffectiveStatsigSignerURL(),
 		ChatTimeoutSeconds: int(cfg.Provider.Web.ChatTimeout.Value().Seconds()), ImageTimeoutSeconds: int(cfg.Provider.Web.ImageTimeout.Value().Seconds()),
 		VideoTimeoutSeconds: int(cfg.Provider.Web.VideoTimeout.Value().Seconds()), MaxInputImageBytes: cfg.Media.MaxImageBytes,
 		AllowNSFW: cfg.Provider.Web.AllowNSFW,

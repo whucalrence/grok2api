@@ -62,6 +62,45 @@ bootstrapAdmin:
 	}
 }
 
+func TestLoadStatsigSignerURLOverrideFromEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(statsigSignerURLEnv, " http://statsig-signer:3000/sign ")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Web.StatsigSignerURL != DefaultStatsigSignerURL {
+		t.Fatalf("persisted signer URL = %q", cfg.Provider.Web.StatsigSignerURL)
+	}
+	if cfg.Provider.Web.StatsigSignerURLOverride != "http://statsig-signer:3000/sign" || cfg.Provider.Web.EffectiveStatsigSignerURL() != "http://statsig-signer:3000/sign" {
+		t.Fatalf("signer override = %#v", cfg.Provider.Web)
+	}
+	if cfg.Provider.Web.EffectiveStatsigMode() != StatsigModeURL {
+		t.Fatalf("effective signer mode = %q", cfg.Provider.Web.EffectiveStatsigMode())
+	}
+}
+
+func TestLoadRejectsUnsafeStatsigSignerURLOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(statsigSignerURLEnv, "http://signer.example.com/sign")
+	if _, err := Load(path); err == nil {
+		t.Fatal("unsafe public plaintext signer override was accepted")
+	}
+}
+
 func TestDefaultGrokBuildClientVersionMatchesLocalBaseline(t *testing.T) {
 	build := defaultConfig().Provider.Build
 	if RecommendedBuildClientVersion != "0.2.99" {

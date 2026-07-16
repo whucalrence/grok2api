@@ -196,6 +196,30 @@ func TestLoadPersistedRejectsIncompleteStatsigPayload(t *testing.T) {
 	}
 }
 
+func TestLoadPersistedKeepsStatsigSignerURLOverride(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Provider.Web.StatsigSignerURLOverride = "http://statsig-signer:3000/sign"
+	value := toDomainConfig(cfg)
+	value.ProviderWeb.StatsigMode = config.StatsigModeManual
+	value.ProviderWeb.StatsigManualValue = base64.RawStdEncoding.EncodeToString(make([]byte, 70))
+	value.ProviderWeb.StatsigSignerURL = "https://signer.example.com/sign"
+	repository := &runtimeSettingsRepositoryStub{value: value, found: true}
+
+	loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Provider.Web.StatsigSignerURL != "https://signer.example.com/sign" {
+		t.Fatalf("persisted signer URL = %q", loaded.Provider.Web.StatsigSignerURL)
+	}
+	if loaded.Provider.Web.StatsigSignerURLOverride != "http://statsig-signer:3000/sign" || loaded.Provider.Web.EffectiveStatsigSignerURL() != "http://statsig-signer:3000/sign" {
+		t.Fatalf("signer override = %#v", loaded.Provider.Web)
+	}
+	if loaded.Provider.Web.StatsigMode != config.StatsigModeManual || loaded.Provider.Web.EffectiveStatsigMode() != config.StatsigModeURL {
+		t.Fatalf("signer mode = %#v", loaded.Provider.Web)
+	}
+}
+
 func TestLoadPersistedRejectsIncompleteBatchPayload(t *testing.T) {
 	cfg := testConfig(t)
 	value := toDomainConfig(cfg)
@@ -284,6 +308,7 @@ func TestUpdateRejectsStaleRevision(t *testing.T) {
 
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
+	t.Setenv("GROK2API_STATSIG_SIGNER_URL", "")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`secrets:
   jwtSecret: "12345678901234567890123456789012"

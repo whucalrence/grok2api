@@ -40,9 +40,11 @@ flowchart LR
     Admin["React Admin"] --> Gateway
 
     Gateway --> Router["Model Router"]
+    Gateway --> Signer["Playwright Statsig Signer"]
     Router --> Build["Grok Build"]
     Router --> Web["Grok Web"]
     Router --> Console["Grok Console"]
+    Signer --> Web
 
     Build --> BuildPool["OAuth Account Pool"]
     Web --> WebPool["SSO Account Pool"]
@@ -63,12 +65,24 @@ flowchart LR
 1. 准备配置：
 
 ```bash
-git clone https://github.com/chenyme/grok2api.git
+git clone https://github.com/whucalrence/grok2api.git
 cd grok2api
 cp config.example.yaml config.yaml
 ```
 
-2. 生成并填写安全密钥：
+2. 写入用于浏览器签名的 Grok 会员 SSO：
+
+```bash
+install -d -m 700 .secrets
+read -rsp "Grok SSO: " GROK_SSO_TOKEN && echo
+printf '%s' "$GROK_SSO_TOKEN" > .secrets/grok-sso-token
+chmod 600 .secrets/grok-sso-token
+unset GROK_SSO_TOKEN
+```
+
+文件中只写原始 SSO Token，不要包含 `sso=`、Cookie 名或分号后的其他 Cookie。该文件已被 Git 和 Docker 构建上下文排除。
+
+3. 生成并填写安全密钥：
 
 ```bash
 openssl rand -hex 32
@@ -85,21 +99,23 @@ bootstrapAdmin:
   password: "替换为强密码"
 ```
 
-3. 启动：
+4. 从当前源码构建并启动：
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose up -d --build
 ```
 
 访问 `http://127.0.0.1:8000`。
 
-官方镜像已经包含前端构建产物，管理端与 API 由同一个 Go 服务提供。Compose 默认将 `config.yaml` 只读挂载到容器，并使用 `grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。
+Compose 会构建 Go 网关和独立的 Playwright signer。signer 使用会员 SSO 建立真实 Grok 浏览器会话，由浏览器维护该会话所需的 Cloudflare 状态，并调用当前网页代码生成 `x-statsig-id`；它不暴露宿主机端口。主服务仅在 signer 健康后启动，因此缺少或失效的 SSO 会在启动阶段直接暴露，而不会静默退回固定签名。Compose 提供的 signer 地址具有部署级优先级，即使旧数据库仍保存手动签名模式，也会使用本地 signer。
+
+`config.yaml` 以只读方式挂载，`grok2api-data` 命名卷保存 SQLite 数据库和本地媒体。签名链路不需要 FlareSolverr，也不需要复制或定期刷新 `cf_clearance`、`x-statsig-id` 或浏览器指纹参数。Playwright 的 Cookie 不会导出给 Go 网关；如果网关出口本身被 Cloudflare 拒绝，仍需在“出口代理”中配置来自同一浏览器会话的代理、User-Agent 与 Cloudflare Cookie。
 
 常用命令：
 
 ```bash
 docker compose logs -f grok2api
+docker compose logs -f statsig-signer
 docker compose restart grok2api
 docker compose down
 ```
@@ -127,7 +143,7 @@ pnpm dev
 ## 首次使用
 
 1. 使用 `bootstrapAdmin` 配置的管理员登录。
-2. 在“上游账号”中接入 Grok Build、Grok Web 或 Grok Console 账号。
+2. 在“上游账号”中导入 Grok Web SSO。已验证的部署路径是使用 signer 的同一个会员 SSO。
 3. 等待本次额度和模型能力同步完成。
 4. 在“模型管理”中确认对外模型名称与启用状态。
 5. 在“客户端密钥”中创建 `g2a_` API Key。
@@ -146,6 +162,8 @@ pnpm dev
 Grok Build OAuth 支持按需续期。Grok Web 与 Grok Console 的 SSO 不可自动续期，凭据失效后账号会退出可用号池并等待重新授权。
 
 Grok Web 与 Grok Console 均支持账号列表 JSON，也支持每行一个 Token 的快速导入。账号接入接口会等待本批账号的首次额度与模型能力同步完成后再返回结果。
+
+Playwright signer 的登录账号只负责建立浏览器签名环境，不会自动写入网关账号池；网关实际调用 Grok Web 前，仍需在管理端导入至少一个有效 Web SSO。更新 `.secrets/grok-sso-token` 后执行 `docker compose restart statsig-signer` 即可切换 signer 登录。SSO 不应出现在命令参数、Issue、日志或截图中。
 
 管理端可复用 Web 账号的同一份 SSO 创建或更新对应的 Console 账号；同步按 Console 身份键幂等执行，不会改变已有 Web/Build 关联。
 
@@ -260,12 +278,17 @@ Provider（包括 Console 上游地址与 User-Agent）、服务容量、批量�
 ## 生产部署
 
 - 使用 HTTPS，并设置 `auth.secureCookies: true`
+- 将 `.secrets/grok-sso-token` 设为仅部署用户可读，绝不提交到 Git 或镜像
+- signer 不应映射宿主机端口；默认 Compose 仅允许网关通过内部网络访问
+- 仅在反向代理与防火墙已配置时监听公网；本机使用可设置 `GROK2API_BIND_ADDRESS=127.0.0.1`
 - 保持 `server.swaggerEnabled: false`
 - 多实例部署使用 PostgreSQL 与 Redis
 - 本地媒体目录在多实例下必须使用共享卷或实例亲和
 - 持久化备份 `config.yaml`、关系型数据库和媒体目录
 - 不要将 OAuth、SSO、Cloudflare Cookie 或账号导出文件提交到 Git
 - 对外暴露前建议配置反向代理、访问日志和基础网络防护
+
+遇到 Grok `403` 时，网关会丢弃缓存签名并再次调用本地 signer。若 signer 自身不健康，先检查 `docker compose logs statsig-signer`，确认 SSO 仍有效；不要把浏览器中抓到的 `x-statsig-id` 固定写入配置。若日志已出现 `signature_created` 但上游仍持续返回 `403`，应继续检查网关出口的 IP、User-Agent 与 Cloudflare Cookie 是否属于同一会话。
 
 ## 开发
 
