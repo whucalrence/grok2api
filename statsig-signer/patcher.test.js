@@ -13,6 +13,20 @@ test("patchStatsigChunk exposes the current Turbopack wrapper", () => {
   assert.match(result.source, /globalThis\.__grok2apiStatsigSign=dY;/);
 });
 
+test("patchStatsigChunk exposes the cached async factory wrapper", () => {
+  const source =
+    'const marker="x-statsig-id";let ur=(a=async()=>(await e.A(4629918)).default(),async function(e,t){n??=a().catch(e=>{throw n=void 0,e});let i=await n;return await i(e,t)}),ul=async e=>e;';
+  const result = patchStatsigChunk(source);
+
+  assert.equal(result.patched, true);
+  assert.equal(result.functionName, "ur");
+  assert.equal(result.loaderModuleID, "4629918");
+  assert.match(
+    result.source,
+    /let ur=.*;globalThis\.__grok2apiStatsigSign=ur;let ul=async e=>e;/,
+  );
+});
+
 test("patchStatsigChunk leaves unrelated chunks unchanged", () => {
   const source = 'const header="x-statsig-id";';
   assert.deepEqual(patchStatsigChunk(source), { patched: false, source });

@@ -10,6 +10,14 @@ const signerWrapperPattern = new RegExp(
     `let (${identifier})=await \\4;return await \\9\\(\\2,\\3\\)\\}`,
 );
 
+const cachedFactorySignerPattern = new RegExp(
+  `let (${identifier})=\\((${identifier})=async\\(\\)=>\\(await (${identifier})\\.A\\((\\d+)\\)\\)\\.default\\(\\),` +
+    `async function\\((${identifier}),(${identifier})\\)\\{` +
+    `(${identifier})\\?\\?=\\2\\(\\)\\.catch\\((${identifier})=>\\{throw \\7=void 0,\\8\\}\\);` +
+    `let (${identifier})=await \\7;return await \\9\\(\\5,\\6\\)\\}\\),` +
+    `(${identifier})=`,
+);
+
 export function patchStatsigChunk(source) {
   if (
     typeof source !== "string" ||
@@ -19,17 +27,36 @@ export function patchStatsigChunk(source) {
     return { patched: false, source };
   }
 
-  const match = signerWrapperPattern.exec(source);
-  if (!match) {
+  const legacyMatch = signerWrapperPattern.exec(source);
+  if (legacyMatch) {
+    const replacement = `${legacyMatch[0]}globalThis.__grok2apiStatsigSign=${legacyMatch[1]};`;
+    return {
+      patched: true,
+      source:
+        source.slice(0, legacyMatch.index) +
+        replacement +
+        source.slice(legacyMatch.index + legacyMatch[0].length),
+      functionName: legacyMatch[1],
+      loaderModuleID: legacyMatch[7],
+    };
+  }
+
+  const factoryMatch = cachedFactorySignerPattern.exec(source);
+  if (!factoryMatch) {
     return { patched: false, source };
   }
 
-  const replacement = `${match[0]}globalThis.__grok2apiStatsigSign=${match[1]};`;
+  const nextVariable = factoryMatch[10];
+  const declaration = factoryMatch[0].slice(0, -(`,${nextVariable}=`.length));
+  const replacement = `${declaration};globalThis.__grok2apiStatsigSign=${factoryMatch[1]};let ${nextVariable}=`;
   return {
     patched: true,
-    source: source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length),
-    functionName: match[1],
-    loaderModuleID: match[7],
+    source:
+      source.slice(0, factoryMatch.index) +
+      replacement +
+      source.slice(factoryMatch.index + factoryMatch[0].length),
+    functionName: factoryMatch[1],
+    loaderModuleID: factoryMatch[4],
   };
 }
 
